@@ -1,0 +1,233 @@
+import os
+import time
+import errno
+import stat
+import sys
+import smtplib
+from datetime import datetime
+
+class LogWatcher(object):
+    #Looks for changes in all files of a directory.
+    
+    def __init__(self, folder, callback, extensions=["log"], tail_lines=0,
+                       sizehint=1048576):
+        """Parameters:
+       folder:the folder to watch
+       callback: function to call whenever file gets updated           
+       extensions:watch only the files with the mentioned extensions
+       tail_lines: read last N lines from files being watched before starting
+       sizehint: passed to file.readlines(), represents an
+            approximation of the maximum number of bytes to read from
+            a file on every ieration (without loading the entire
+            file in memory until EOF is reached). 
+        """
+        
+        self.folder = os.path.realpath(folder)
+        self.extensions = extensions
+        self._files_map = {}
+        self._callback = callback
+        self._sizehint = sizehint
+        assert os.path.isdir(self.folder), self.folder
+        assert callable(callback), repr(callback)
+        self.update_files()
+        for id, file in self._files_map.items():
+            file.seek(os.path.getsize(file.name))  # EOF
+            if tail_lines:
+                try:
+                    lines = self.tail(file.name, tail_lines)
+                except IOError as err:
+                    if err.errno != errno.ENOENT:
+                        raise
+                else:
+                    if lines:
+                        self._callback(file.name, lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
+    def loop(self, interval=0.1, blocking=True):
+        """Start a busy loop checking for file changes every *interval*
+        seconds. If *blocking* is False make one loop then return.
+        """
+        # Note that directly calling readlines() as we do is faster
+        # than first checking file's last modification times.
+        while True:
+            self.update_files()
+            for fid, file in list(self._files_map.items()):
+                self.readlines(file)
+            if not blocking:
+                return
+            time.sleep(interval)
+
+    def log(self, line):
+        """Log when a file is un/watched"""
+        print(line)
+
+    def listdir(self):
+        #Filter the files from Directory by extension
+        
+        ls = os.listdir(self.folder)
+        if self.extensions:
+            return [x for x in ls if os.path.splitext(x)[1][1:] \
+                                           in self.extensions]
+        else:
+            return ls
+
+    @classmethod
+    def open(cls, file):
+        #Open the file, r - open file for reading, b- Binary mode
+        return open(file, 'rb')
+
+    @classmethod
+    def tail(cls, fname, window):
+        #Read last n lines from the file
+        if window <= 0:
+            raise ValueError('invalid window value %r' % window)
+        with cls.open(fname) as f:
+            BUFSIZ = 1024
+            encoded = getattr(f, 'encoding', False)
+            CR = '\n' if encoded else b'\n'
+            data = '' if encoded else b''
+            f.seek(0, os.SEEK_END)
+            fsize = f.tell()
+            block = -1
+            exit = False
+            while not exit:
+                step = (block * BUFSIZ)
+                if abs(step) >= fsize:
+                    f.seek(0)
+                    newdata = f.read(BUFSIZ - (abs(step) - fsize))
+                    exit = True
+                else:
+                    f.seek(step, os.SEEK_END)
+                    newdata = f.read(BUFSIZ)
+                data = newdata + data
+                if data.count(CR) >= window:
+                    break
+                else:
+                    block -= 1
+            return data.splitlines()[-window:]
+
+    def update_files(self):
+        ls = []
+        for name in self.listdir():
+            absname = os.path.realpath(os.path.join(self.folder, name))
+            try:
+                st = os.stat(absname)
+            except EnvironmentError as err:
+                if err.errno != errno.ENOENT:
+                    raise
+            else:
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                fid = self.get_file_id(st)
+                ls.append((fid, absname))
+
+        # check existent files
+        for fid, file in list(self._files_map.items()):
+            try:
+                st = os.stat(file.name)
+            except EnvironmentError as err:
+                if err.errno == errno.ENOENT:
+                    self.unwatch(file, fid)
+                else:
+                    raise
+            else:
+                if fid != self.get_file_id(st):
+                    # same name but different file (rotation); reload it.
+                    self.unwatch(file, fid)
+                    self.watch(file.name)
+
+        # add new ones
+        for fid, fname in ls:
+            if fid not in self._files_map:
+                self.watch(fname)
+
+    def readlines(self, file):
+        """Read file lines since last access until EOF is reached and
+        invoke callback.
+        """
+        while True:
+            lines = file.readlines(self._sizehint)
+            if not lines:
+                break
+            self._callback(file.name, lines)
+
+    def watch(self, fname):
+        try:
+            file = self.open(fname)
+            fid = self.get_file_id(os.stat(fname))
+        except EnvironmentError as err:
+            if err.errno != errno.ENOENT:
+                raise
+        else:
+            self.log("watching logfile %s" % fname)
+            self._files_map[fid] = file
+
+    def unwatch(self, file, fid):
+        # File no longer exists. If it has been renamed try to read it
+        # for the last time in case we're dealing with a rotating log
+        # file.
+        self.log("un-watching logfile %s" % file.name)
+        del self._files_map[fid]
+        with file:
+            lines = self.readlines(file)
+            if lines:
+                self._callback(file.name, lines)
+
+    @staticmethod
+    def get_file_id(st):
+       return "%f" % st.st_ctime
+
+    def close(self):
+        for id, file in self._files_map.items():
+            file.close()
+        self._files_map.clear()
+
+def callback(filename, lines):
+    while lines:
+        line = lines.pop(0).rstrip()
+        noheader = False
+       # if line.startswith(b'ERROR'):
+        if line.startswith(('ERROR').encode('utf-8')):
+            
+            sender = 'from@fromdomain.com'
+            receivers = ['abc@gmail.com']
+            """
+            message = From: From Person <from@fromdomain.com>
+            To: To Person <abc@gmail.com>
+            Subject: Error Logged
+
+            This is a test e-mail message.
+            """
+            message = line
+            print(str(line) + str(datetime.now()))
+            
+            """
+
+            try:
+               smtpObj = smtplib.SMTP('localhost')
+               smtpObj.sendmail(sender, receivers, message)         
+               print ("Successfully sent email")
+            except SMTPException:
+               print ("Error: unable to send email")
+            """
+        else:
+            noheader = True
+         
+        #if noheader:
+         #   print("xyxyxyxyx")
+        #else:
+        endheader = line.find(b'.')
+        line = line[endheader + 1:]
+        #print(line)
+
+watcher = LogWatcher("/Users/kpothapragad/AI_Driving_Co-Pilot-master/", callback, tail_lines=100)
+
+watcher.loop()
